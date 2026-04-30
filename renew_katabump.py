@@ -14,9 +14,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.common.exceptions import TimeoutException, WebDriverException
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # ===================== 配置日志 =====================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -110,44 +107,68 @@ class KatabumpAutoRenew:
             self.driver = uc.Chrome(options=chrome_options, headless=HEADLESS)
         self.driver.set_window_size(1280, 720)
 
-    def _handle_turnstile(self, context=""):
-        """优化后的 Cloudflare 验证逻辑"""
+    def _handle_captcha(self, context=""):
+        """精准定位并验证：自动切换 CF 与 ALTCHA 判定逻辑"""
         try:
+            # 1. 混合等待
             container = WebDriverWait(self.driver, 15).until(
-                EC.presence_of_element_located((By.CLASS_NAME, "cf-turnstile"))
+                EC.any_of(
+                    EC.presence_of_element_located((By.CLASS_NAME, "cf-turnstile")),
+                    EC.presence_of_element_located((By.TAG_NAME, "altcha-widget"))
+                )
             )
+            tag_name = container.tag_name.lower()
+            is_altcha = (tag_name == "altcha-widget")
             size = container.size
-            base_offset_x = -(size['width'] / 2) + (size['width'] * 0.12)
-            rand_x = base_offset_x + random.uniform(-5, 5)
-            rand_y = random.uniform(-5, 5)
 
+            # 2. 坐标计算
+            if is_altcha:
+                target_x = -(size['width'] / 2) + 28 + random.uniform(-2, 2)
+                target_y = -(size['height'] / 2) + 25 + random.uniform(-2, 2)
+                logger.info(f"🖱️ {self.masked_user} - [{context}] 检测到 ALTCHA，执行点击...")
+            else:
+                target_x = -(size['width'] / 2) + (size['width'] * 0.15)
+                target_y = 0 
+                logger.info(f"🖱️ {self.masked_user} - [{context}] 检测到 Cloudflare，执行点击...")
+                
             actions = ActionChains(self.driver)
             actions.move_to_element(container)
             actions.pause(random.uniform(0.5, 0.8))
-            actions.move_to_element_with_offset(container, rand_x, rand_y)
-            actions.click_and_hold()
-            actions.pause(random.uniform(0.1, 0.25))
-            actions.release()
-            actions.perform()
-            
-            logger.info(f"🖱️ {self.masked_user} - [{context}] 执行偏移点击...")
-            
-            # 轮询检查 Token
-            validated = False
-            for _ in range(15):
-                token = self.driver.execute_script(
-                    'return document.querySelector("input[name=\'cf-turnstile-response\']").value;'
-                )
-                if token and len(token) > 20:
-                    logger.info(f"✅ {self.masked_user} - [{context}] 验证已通过 (Token Ready)")
-                    sleep(1500 + random.random() * 1000)
-                    validated = True
-                    break
-                sleep(1000)
-            return validated
-        except Exception as e:
-            logger.error(f"❌ {self.masked_user} - [{context}] 验证交互失败: {e}")
+            actions.move_to_element_with_offset(container, target_x, target_y)
+            actions.click_and_hold().pause(random.uniform(0.15, 0.3)).release().perform()
+
+            # 3. 结果判定
+            for i in range(30):
+                if is_altcha:
+                    result = self.driver.execute_script('''
+                        const el = document.querySelector("altcha-widget");
+                        if (!el) return null;
+                        return {
+                            state: el.getAttribute("data-state"),
+                            payload: document.querySelector("input[name='altcha']")?.value
+                        };
+                    ''')
+                    if result:
+                        if result['state'] == "verified" or (result['payload'] and len(result['payload']) > 10):
+                            logger.info(f"✅ {self.masked_user} - [{context}] ALTCHA 验证通过")
+                            sleep(1500)
+                            return True
+                        if i == 7 and result['state'] == "unverified":
+                            actions.move_by_offset(2, 2).click().perform()
+                else:
+                    token = self.driver.execute_script(
+                        'return document.querySelector("input[name=\'cf-turnstile-response\']").value;'
+                    )
+                    if token and len(token) > 20:
+                        logger.info(f"✅ {self.masked_user} - [{context}] Cloudflare 验证通过")
+                        return True               
+                sleep(1000)            
+            logger.warning(f"⚠️ {self.masked_user} - [{context}] 验证超时")
             return False
+
+        except Exception as e:
+            logger.info(f"ℹ️ {self.masked_user} - [{context}] 未发现验证码或跳过: {e}")
+            return True
 
     def process(self):
         logger.info(f"🚀 开始登录账号: {self.masked_user}")
@@ -167,7 +188,7 @@ class KatabumpAutoRenew:
         sleep(2000 + random.random() * 1000)
 
         # --- 登录页 CF 验证 ---
-        self._handle_turnstile("Login Auth")
+        self._handle_captcha("Login Auth")
 
         logger.info(f"📤 {self.masked_user} - 点击“Login”提交登录...")
         self.driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]').click()
@@ -207,7 +228,7 @@ class KatabumpAutoRenew:
         sleep(2000 + random.random() * 1000)
 
         # --- 续期弹窗 CF 验证 ---
-        self._handle_turnstile("Renew Modal")
+        self._handle_captcha("Renew Modal")
 
         # --- 最终 Renew 按钮 ---
         try:
