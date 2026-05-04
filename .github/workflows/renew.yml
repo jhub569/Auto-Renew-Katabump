@@ -16,21 +16,42 @@ jobs:
       - name: Interval Check (Strict 4-day cycle)
         id: check
         run: |
-          # 如果是手动触发，则跳过检查直接运行
+          # ── 配置区 ──────────────────────────────────────────
+          # 1. 设定起始日期
+          START_DATE="2026-05-05"
+
+          # 2. 设定间隔天数
+          INTERVAL=4
+          # ──────────────────────────────────────────────────
+
+          export TZ='Asia/Shanghai'
+
+          # 如果是手动触发，则直接运行
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "run=true" >> $GITHUB_OUTPUT
             exit 0
           fi
+
+          # 获取上海时间当前的日期（00:00:00 确保计算整天）
+          CURRENT_DATE=$(date +%Y-%m-%d)
           
-          # 计算当前 Unix 天数 (UTC)
-          DAYS=$(( $(date -u +%s) / 86400 ))
-          REMAINDER=$(( $DAYS % 4 ))
-          
-          if [ $REMAINDER -eq 1 ]; then
-            echo "Today is the scheduled day. Starting workflow..."
+          # 转换为时间戳
+          CURRENT_TS=$(date -d "$CURRENT_DATE 00:00:00" +%s)
+          START_TS=$(date -d "$START_DATE 00:00:00" +%s)
+
+          # 计算天数差
+          # 用当前时间减去起始时间
+          DIFF=$(( ($CURRENT_TS - $START_TS) / 86400 ))
+
+          # 逻辑判断
+          if [ $DIFF -lt 0 ]; then
+            echo "Today is before the START_DATE. Skipping."
+            echo "run=false" >> $GITHUB_OUTPUT
+          elif [ $(( $DIFF % $INTERVAL )) -eq 0 ]; then
+            echo "Matches cycle! Days since $START_DATE: $DIFF (Modulo $INTERVAL = 0)."
             echo "run=true" >> $GITHUB_OUTPUT
           else
-            echo "Not today. Skipping (Current remainder: $REMAINDER, Target: 1)."
+            echo "Not today. Days since $START_DATE: $DIFF. Next run in $(( $INTERVAL - ($DIFF % $INTERVAL) )) days."
             echo "run=false" >> $GITHUB_OUTPUT
           fi
           
